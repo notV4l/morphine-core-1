@@ -1,2 +1,5 @@
 [crate_roots]
 erc20 = "."
+lib = "."
+storage = "."
+math = "."

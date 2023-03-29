@@ -1,31 +1,63 @@
 use zeroable::Zeroable;
 use starknet::get_caller_address;
+use starknet::get_contract_address;
 use starknet::contract_address_const;
 use starknet::ContractAddress;
 use starknet::ContractAddressZeroable;
-use super::IERC20Dispatcher;
-use super::IERC20DispatcherTrait;
-use suna::math::u256::U256TruncatedDiv;
-use suna::math::u256::U256TruncatedDivEq;
-use suna::math::u256::U256TruncatedRem;
-use suna::math::u256::U256TruncatedRemEq;
+use integer::BoundedInt;
 
-trait IERC20 {
-    fn get_name() -> felt252;
-    fn get_symbol() -> felt252;
-    fn get_decimals() -> u8;
-    fn get_total_supply() -> u256;
-    fn balance_of(account: ContractAddress) -> u256;
-    fn allowance(owner: ContractAddress, spender: ContractAddress) -> u256;
-    fn transfer(recipient: ContractAddress, amount: u256);
-    fn transfer_from(sender: ContractAddress, recipient: ContractAddress, amount: u256);
-    fn approve(spender: ContractAddress, amount: u256);
-    fn increase_allowance(spender: ContractAddress, added_value: u256);
-    fn decrease_allowance(spender: ContractAddress, subtracted_value: u256);
-}
+#[abi]
+    trait IERC20 {
+        fn get_name() -> felt252;
+        fn get_symbol() -> felt252;
+        fn get_decimals() -> u8;
+        fn get_total_supply() -> u256;
+        fn balance_of(account: ContractAddress) -> u256;
+        fn allowance(owner: ContractAddress, spender: ContractAddress) -> u256;
+        fn transfer(recipient: ContractAddress, amount: u256);
+        fn transfer_from(sender: ContractAddress, recipient: ContractAddress, amount: u256);
+        fn approve(spender: ContractAddress, amount: u256);
+        fn increase_allowance(spender: ContractAddress, added_value: u256);
+        fn decrease_allowance(spender: ContractAddress, subtracted_value: u256);
+        fn mint(recipient: ContractAddress, amount: u256);
+    }
 
 #[contract]
 mod ERC4626 {
+
+    use zeroable::Zeroable;
+    use starknet::get_caller_address;
+    use starknet::get_contract_address;
+    use starknet::contract_address_const;
+    use starknet::ContractAddress;
+    use starknet::ContractAddressZeroable;
+    use integer::BoundedInt;
+    use super::IERC20Dispatcher;
+    use super::IERC20DispatcherTrait;
+
+
+    impl U256TruncatedDiv of Div::<u256> {
+        fn div(a: u256, b: u256) -> u256 {
+            assert(a.high == 0_u128 & b.high == 0_u128, 'u256 too large');
+            u256 { low: a.low / b.low, high: 0_u128 }
+        }
+    }
+
+    impl U256Zeroable of Zeroable::<u256> {
+        fn zero() -> u256 {
+            u256 { low: 0_u128, high: 0_u128 }
+        }
+
+        fn is_zero(self: u256) -> bool {
+            self == U256Zeroable::zero()
+        }
+
+        fn is_non_zero(self: u256) -> bool {
+            !self.is_zero()
+        }
+    }
+
+
     struct Storage {
         name: felt252,
         symbol: felt252,
@@ -42,20 +74,208 @@ mod ERC4626 {
     #[event]
     fn Approval(owner: ContractAddress, spender: ContractAddress, value: u256) {}
 
+    #[event]
+    fn Deposit(caller: ContractAddress, owner: ContractAddress, assets: u256, shars: u256) {}
+
+    #[event]
+    fn Withdraw(
+        caller: ContractAddress,
+        receiver: ContractAddress,
+        owner: ContractAddress,
+        assets: u256,
+        shares: u256
+    ) {}
+
+
     #[constructor]
-    fn constructor(
-        name_: felt252,
-        symbol_: felt252,
-        decimals_: u8,
-        initial_supply: u256,
-        recipient: ContractAddress
-    ) {
+    fn constructor(name_: felt252, symbol_: felt252, underlying_: ContractAddress) {
         name::write(name_);
         symbol::write(symbol_);
         let token = IERC20Dispatcher { contract_address: underlying_ };
         decimals::write(token.get_decimals());
         underlying::write(underlying_);
     }
+
+    //
+    // ERC 4626
+    //
+
+    #[view]
+    fn get_asset() -> ContractAddress {
+        underlying::read()
+    }
+
+    // FUNCTIONS TO IMPLEMENT
+
+    #[view]
+    fn total_assets() -> u256 {
+        Zeroable::zero()
+    }
+
+
+    // CONVERT FUNCTIONS
+
+    #[view]
+    fn convert_to_shares(assets: u256) -> u256 {
+        if (total_supply::read().is_zero() == true) {
+            assets
+        } else {
+            Div::div(assets * total_supply::read(), total_assets())
+        }
+    }
+
+    #[view]
+    fn convert_to_assets(shares: u256) -> u256 {
+        if (total_supply::read().is_zero() == true) {
+            shares
+        } else {
+            Div::div(shares * total_assets(), total_supply::read())
+        }
+    }
+
+    // DEPOSIT
+
+    #[view]
+    fn max_deposit(receiver: ContractAddress) -> u256 {
+        BoundedInt::max()
+    }
+
+    #[view]
+    fn preview_deposit(assets: u256) -> u256 {
+        convert_to_shares(assets)
+    }
+
+    #[external]
+    fn deposit(assets: u256, receiver: ContractAddress) -> u256 {
+        let shares = preview_deposit(assets);
+        let token = IERC20Dispatcher { contract_address: underlying::read() };
+        let caller = get_caller_address();
+        let self = get_contract_address();
+        token.transfer_from(caller, self, assets);
+        _mint(receiver, shares);
+        Deposit(caller, receiver, assets, shares);
+        shares
+    }
+
+    // MINT
+
+    #[view]
+    fn max_mint(receiver: ContractAddress) -> u256 {
+        BoundedInt::max()
+    }
+
+    #[view]
+    fn preview_mint(shares: u256) -> u256 {
+        if (total_supply::read().is_zero() == true) {
+            shares
+        } else {
+            div_up(shares * total_assets(), total_supply::read())
+        }
+    }
+
+    #[external]
+    fn mint(shares: u256, receiver: ContractAddress) -> u256 {
+        let assets = preview_mint(shares);
+        let token = IERC20Dispatcher { contract_address: underlying::read() };
+        let caller = get_caller_address();
+        let self = get_contract_address();
+        token.transfer_from(caller, self, assets);
+        _mint(receiver, shares);
+        Deposit(caller, receiver, assets, shares);
+        shares
+    }
+
+    // WITHDDRAW
+
+    #[view]
+    fn max_withdraw(owner: ContractAddress) -> u256 {
+        let owner_balance = balance_of(owner);
+        convert_to_assets(owner_balance)
+    }
+
+    #[view]
+    fn preview_withdraw(assets: u256) -> u256 {
+        if (total_supply::read().is_zero() == true) {
+            assets
+        } else {
+            div_up(assets * total_supply::read(), total_assets())
+        }
+    }
+
+    #[external]
+    fn withdraw(assets: u256, receiver: ContractAddress, owner: ContractAddress) -> u256 {
+        let shares = preview_withdraw(assets);
+        let caller = get_caller_address();
+
+        if (caller != owner) {
+            decrease_allowance_by_amount(owner, caller, shares);
+        }
+
+        _burn(owner, shares);
+        let token = IERC20Dispatcher { contract_address: underlying::read() };
+        token.transfer(receiver, assets);
+        Withdraw(caller, receiver, owner, assets, shares);
+        shares
+    }
+
+    // REDEEM
+
+    #[view]
+    fn max_redeem(owner: ContractAddress) -> u256 {
+        balance_of(owner)
+    }
+
+    #[view]
+    fn preview_redeem(shares: u256) -> u256 {
+        convert_to_assets(shares)
+    }
+
+    #[external]
+    fn redeem(shares: u256, receiver: ContractAddress, owner: ContractAddress) -> u256 {
+        let assets = preview_redeem(shares);
+        let caller = get_caller_address();
+
+        if (caller != owner) {
+            decrease_allowance_by_amount(owner, caller, shares);
+        }
+
+        _burn(owner, shares);
+        let token = IERC20Dispatcher { contract_address: underlying::read() };
+        token.transfer(receiver, assets);
+        Withdraw(caller, receiver, owner, assets, shares);
+        assets
+    }
+
+    // HELPER FUNCTIONS
+
+    fn decrease_allowance_by_amount(
+        owner: ContractAddress, spender: ContractAddress, amount: u256
+    ) {
+        if (allowances::read(
+            (owner, spender)
+        ) == BoundedInt::max()) {} else {
+            if (allowances::read(
+                (owner, spender)
+            ) < amount) { // should display an error message, don't know how to do it
+            } else {
+                allowances::write((owner, spender), allowances::read((owner, spender)) - amount);
+            }
+        }
+    }
+
+    fn div_up(a: u256, b: u256) -> u256 {
+        assert(a.high == 0_u128 & b.high == 0_u128, 'u256 too large');
+        let q = u256 { low: a.low / b.low, high: 0_u128 };
+        let r = u256 { low: a.low % b.low, high: 0_u128 };
+        if (r.is_zero() == true) {
+            q
+        } else {
+            q + u256 { low: 1_u128, high: 0_u128 }
+        }
+    }
+
+
+    // ERC20 IMPLEMENTATION
 
     #[view]
     fn get_name() -> felt252 {
@@ -98,6 +318,20 @@ mod ERC4626 {
         let caller = get_caller_address();
         spend_allowance(sender, caller, amount);
         transfer_helper(sender, recipient, amount);
+    }
+
+    #[external]
+    fn _mint(recipient: ContractAddress, amount: u256) {
+        total_supply::write(total_supply::read() + amount);
+        balances::write(recipient, balances::read(recipient) + amount);
+        Transfer(Zeroable::zero(), recipient, amount);
+    }
+
+    #[external]
+    fn _burn(owner: ContractAddress, amount: u256) {
+        total_supply::write(total_supply::read() - amount);
+        balances::write(owner, balances::read(owner) - amount);
+        Transfer(owner, Zeroable::zero(), amount);
     }
 
     #[external]
