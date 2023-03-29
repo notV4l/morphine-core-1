@@ -256,7 +256,8 @@ mod ERC4626 {
         ) == BoundedInt::max()) {} else {
             if (allowances::read(
                 (owner, spender)
-            ) < amount) { // should display an error message, don't know how to do it
+            ) < amount) { 
+                assert(1==2, 'not enough allowance');
             } else {
                 allowances::write((owner, spender), allowances::read((owner, spender)) - amount);
             }
