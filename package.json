@@ -1,0 +1,11 @@
+{
+  "name": "morphine-core-1",
+  "version": "1.0.0",
+  "main": "index.js",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "tocorelib": "node ./scripts/to_corelib.js",
+    "build": "yarn tocorelib && node ./scripts/build.js"
+  }
+}
